@@ -77,6 +77,7 @@ if [ -f "${SUPPORT_DIR}/launch.properties" ]; then
 	# Production Environment
 	INSTALL_DIR="${SUPPORT_DIR}/.."
 	CPATH="${INSTALL_DIR}/Ghidra/Framework/Utility/lib/Utility.jar"
+	CPATH="${CPATH}:${INSTALL_DIR}/Ghidra/Features/FlatLaf/lib/flatlaf.jar"
 	LS_CPATH="${SUPPORT_DIR}/LaunchSupport.jar"
 	DEBUG_LOG4J="${SUPPORT_DIR}/debug.log4j.xml"
 else

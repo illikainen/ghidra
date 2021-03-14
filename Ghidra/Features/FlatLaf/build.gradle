@@ -1,0 +1,8 @@
+apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
+apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
+apply plugin: "eclipse"
+eclipse.project.name = "Features FlatLaf"
+
+dependencies {
+    compile ":flatlaf"
+}

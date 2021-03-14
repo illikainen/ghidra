@@ -64,7 +64,7 @@ goto showUsage
 :: Production Environment
 ::
 set INSTALL_DIR=%SUPPORT_DIR%..\
-set CPATH=%INSTALL_DIR%Ghidra\Framework\Utility\lib\Utility.jar
+set CPATH=%INSTALL_DIR%Ghidra\Framework\Utility\lib\Utility.jar;%INSTALL_DIR%Ghidra\Features\FlatLaf\lib\flatlaf.jar
 set LS_CPATH=%SUPPORT_DIR%LaunchSupport.jar
 set DEBUG_LOG4J=%SUPPORT_DIR%debug.log4j.xml
 

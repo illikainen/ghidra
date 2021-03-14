@@ -1,0 +1,2 @@
+EXCLUDE FROM GHIDRA JAR: true
+MODULE FILE LICENSE: lib/flatlaf.jar Apache License 2.0
