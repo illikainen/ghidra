@@ -1,0 +1,63 @@
+---
+name: pipeline
+
+on:
+  push:
+    branches:
+      hji*
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
+      - name: Delete old releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 utils/delete-releases
+      - name: Create release
+        id: release
+        uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          draft: false
+          tag_name: pipeline
+          release_name: pipeline
+    outputs:
+      upload_url: ${{ steps.release.outputs.upload_url }}
+  build:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        include:
+          - os: ubuntu-latest
+            asset: ghidra-linux64.zip
+          - os: windows-latest
+            asset: ghidra-win64.zip
+    runs-on: ${{ matrix.os }}
+    needs:
+      - release
+    steps:
+      - name: Setup Java
+        uses: actions/setup-java@d202f5dbf7256730fb690ec59f6381650114feb2
+        with:
+          java-version: 11
+      - name: Checkout
+        uses: actions/checkout@5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
+      - name: Download dependencies
+        run: python3 utils/ghidra get-deps
+      - name: Build
+        run: python3 utils/ghidra build
+      - name: Upload assets
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.release.outputs.upload_url }}
+          asset_path: build/dist/ghidra.zip
+          asset_name: ${{ matrix.asset }}
+          asset_content_type: application/zip
