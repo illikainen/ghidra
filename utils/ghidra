@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+
+import argparse
+import dataclasses
+import hashlib
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+from pathlib import Path
+from typing import Optional
+
+
+@dataclasses.dataclass  # pylint: disable=too-few-public-methods
+class Extract:
+    path: Path
+    pattern: str = ".*"
+    parts: int = 1
+
+
+@dataclasses.dataclass
+class Dependency:
+    url: str
+    path: Path
+    sha256: str
+    extract: Optional[Extract] = None
+    cache_path: Path = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        cache_dir = os.getenv("GHIDRA_CACHE", str(Path("build") / "downloads"))
+        self.cache_path = Path(cache_dir) / self.path.name
+
+    def download(self):
+        if not self.cache_path.is_file():
+            print(f"{self.cache_path}: downloading")
+            self.cache_path.parent.mkdir(exist_ok=True, parents=True)
+
+            with open(self.cache_path, "wb") as f:
+                with urllib.request.urlopen(self.url) as req:
+                    while True:
+                        data = req.read(4096)
+                        if not data:
+                            break
+                        f.write(data)
+        self.verify()
+
+    def verify(self):
+        sha256 = hashlib.sha256()
+        with open(self.cache_path, "rb") as f:
+            while True:
+                data = f.read(4096)
+                if not data:
+                    break
+                sha256.update(data)
+
+        if sha256.hexdigest() != self.sha256:
+            self.cache_path.unlink()
+            raise OSError(f"{self.cache_path}: verification failed")
+        print(f"{self.cache_path}: successfully verified {self.sha256}")
+
+    def populate(self):
+        self.path.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(self.cache_path, self.path)
+
+    def unarchive(self):
+        if self.extract:
+            with ZipFile(self.path) as z:
+                z.unarchive(
+                    self.extract.path, self.extract.pattern, self.extract.parts
+                )
+
+
+class ZipFile(zipfile.ZipFile):
+    def unarchive(self, path, pattern=".*", parts=0):
+        for info in self.infolist():
+            if not info.filename.endswith("/"):
+                if re.search(pattern, info.filename):
+                    dst = path.joinpath(*Path(info.filename).parts[parts:])
+                    if not dst.exists():
+                        info.filename = str(dst)
+                        self.extract(info)
+
+    def write_file(self, path, arcpath):
+        if not self.has_path(arcpath):
+            self.write(path, arcpath)
+
+    def write_dir(self, path, arcpath):
+        for src in path.rglob("*"):
+            if not src.is_dir():
+                self.write_file(src, arcpath / src.relative_to(path))
+
+    def write_data(self, data, arcpath):
+        if not self.has_path(arcpath):
+            self.writestr(str(arcpath), data)
+
+    def write_zip(self, path, arcpath):
+        with ZipFile(path) as z:
+            for src in z.namelist():
+                if not src.endswith("/"):
+                    self.write_data(z.read(src), arcpath / src)
+
+    def has_path(self, path):
+        try:
+            self.getinfo(str(path))
+        except KeyError:
+            return False
+        return True
+
+    @property
+    def root(self):
+        names = {Path(name).parts[0] for name in self.namelist()}
+        if len(names) != 1:
+            raise OSError("multiple root directories found")
+        return Path(names.pop())
+
+    @staticmethod
+    def get(path):
+        archive, *rest = path.glob("*.zip")
+        if rest:
+            raise OSError(f"multiple archives found in {path}")
+        return archive
+
+
+# Most dependencies are extracted from the binary distribution to
+# simplify offline builds.
+GHIDRA = Dependency(
+    url="https://ghidra-sre.org/ghidra_9.2.2_PUBLIC_20201229.zip",
+    path=Path("flatRepo") / "ghidra_9.2.2_PUBLIC_20201229.zip",
+    sha256="8cf8806dd5b8b7c7826f04fad8b86fc7e07ea380eae497f3035f8c974de72cf8",
+    extract=Extract(
+        path=Path("flatRepo"), pattern=r".*/lib/.*\.jar$", parts=-1
+    ),
+)
+
+# FunctionID datasets are extracted from upstream because the fork by
+# 0x6d696368 doesn't include datasets for VS2017 and VS2019.
+GHIDRA_DATA = Dependency(
+    url=(
+        "https://github.com/NationalSecurityAgency/ghidra-data/archive/"
+        "7d843ec229d43c2d1a8178aaa892be90e37e95a2.zip"
+    ),
+    path=Path("flatRepo") / "ghidra-data.zip",
+    sha256="970edf22808641314df60b7f34bec50b280d0b31ce3d1b486ad5e724d9c7de72",
+    extract=Extract(
+        path=Path("flatRepo") / "ghidra-data", pattern=r".*\.fidb$", parts=-2
+    ),
+)
+
+# Extract symbol information from the fork by 0x6d696368.
+GHIDRA_DATA_EXTRA = Dependency(
+    url=(
+        "https://github.com/0x6d696368/ghidra-data/archive/"
+        "5a8177ffd39fa52045de6f5f2686e5d4e10a0614.zip"
+    ),
+    path=Path("flatRepo") / "ghidra-data-0x6d696368.zip",
+    sha256="5e54eec25ff7e14fbad91823428920da5c55dcb79b33bf027d7f765fa7835f1a",
+    extract=Extract(
+        path=Path("flatRepo") / "ghidra-data-0x6d696368",
+        pattern=r".*\.exports$",
+        parts=-3,
+    ),
+)
+
+GHIDRA_EXTENSION_CPP_CLASS_ANALYZER = Dependency(
+    url=(
+        "https://github.com/astrelsky/Ghidra-Cpp-Class-Analyzer/archive/"
+        "f10241e549f75137bd7e0b78d604b330876ab153.zip"
+    ),
+    path=Path("flatRepo") / "ghidra-extension-cpp-class-analyzer.zip",
+    sha256="f2e186292270bd38b30231ce727ae388d167b20cd97e5e624aff991266452838",
+    extract=Extract(path=Path("flatRepo") / "Cpp-Class-Analyzer"),
+)
+
+GHIDRA_EXTENSION_RET_SYNC = Dependency(
+    url=(
+        "https://github.com/bootleg/ret-sync/archive/"
+        "2f833b059183e6b469cfb8338d545939aada4a6f.zip"
+    ),
+    path=Path("flatRepo") / "ret-sync.zip",
+    sha256="fcb9ce6e2474126840206e8bad5d918a5a73ce2152160e55f7b7f7af4306e1c4",
+    extract=Extract(
+        path=Path("flatRepo") / "ret-sync",
+        pattern=r"/ext_ghidra/(?!.*\.zip)",
+        parts=2,
+    ),
+)
+
+GHIDRA_EXTENSION_PWNDRA = Dependency(
+    url=(
+        "https://github.com/0xb0bb/pwndra/archive/"
+        "0556da6f8952aff666a20cdabc1ddb17fcfc7099.zip"
+    ),
+    path=Path("flatRepo") / "pwndra.zip",
+    sha256="4bdb4a0d2e1be639ebc28ad390b6d11c1ef541ffa881104d87d78e5e772a2697",
+    extract=Extract(
+        path=Path("flatRepo") / "pwndra",
+        pattern=r"/(LICENSE|scripts/.*\.(json|py))$",
+        parts=1,
+    ),
+)
+
+GHIDRA_EXTENSION_LAZY_GHIDRA = Dependency(
+    url=(
+        "https://github.com/AllsafeCyberSecurity/LazyGhidra/archive/"
+        "fc854c7475821339ac8c2187603fc7e8edf11421.zip"
+    ),
+    path=Path("flatRepo") / "LazyGhidra.zip",
+    sha256="cf2416e4f8263f8361b2dc8b952a9e69090cac51baad6bf0a927f2bf859e9fad",
+    extract=Extract(
+        path=Path("flatRepo") / "LazyGhidra",
+        pattern=r"/(LICENSE\.md|scripts/.*\.py)$",
+        parts=1,
+    ),
+)
+
+GRADLE = Dependency(
+    url="https://ftp.openbsd.org/pub/OpenBSD/distfiles/gradle-6.7-bin.zip",
+    path=Path("flatRepo") / "gradle-6.7-bin.zip",
+    sha256="8ad57759019a9233dc7dc4d1a530cefe109dc122000d57f7e623f8cf4ba9dfc4",
+    extract=Extract(path=Path("flatRepo") / "gradle-6.7-bin"),
+)
+
+ANTLR = Dependency(
+    url="https://gentoo.osuosl.org/distfiles/antlr-3.5.2-complete.jar",
+    path=Path("flatRepo") / "antlr-3.5.2.jar",
+    sha256="26ca659f47d77384f518cf2b6463892fcd4f0b0d4d8c0de2addf697e63e7326b",
+)
+
+ST4 = Dependency(
+    url="https://gentoo.osuosl.org/distfiles/ST4-4.0.8.jar",
+    path=Path("flatRepo") / "ST4-4.0.8.jar",
+    sha256="58caabc40c9f74b0b5993fd868e0f64a50c0759094e6a251aaafad98edfc7a3b",
+)
+
+JAVACC = Dependency(
+    url="https://ftp.openbsd.org/pub/OpenBSD/distfiles/javacc-5.0.jar",
+    path=Path("flatRepo") / "javacc-5.0.jar",
+    sha256="71113161bc8cf6641515541c2818028b87c78ec2e8ffaa75317686ee08967b89",
+)
+
+JUNIT = Dependency(
+    url="https://ftp.openbsd.org/pub/OpenBSD/distfiles/junit-4.12.jar",
+    path=Path("flatRepo") / "junit-4.12.jar",
+    sha256="59721f0805e223d84b90677887d9ff567dc534d7c502ca903c0c2b17f05c116a",
+)
+
+YAJSW = Dependency(
+    url="https://ftp.openbsd.org/pub/OpenBSD/distfiles/yajsw-stable-12.12.zip",
+    path=(
+        Path("Ghidra")
+        / "Features"
+        / "GhidraServer"
+        / "build"
+        / "yajsw-stable-12.12.zip"
+    ),
+    sha256="1398fcb1e93abb19992c4fa06d7fe5758aabb4c45781d7ef306c6f57ca7a7321",
+)
+
+FLATLAF = Dependency(
+    url=(
+        "https://repo1.maven.org/maven2/com/formdev/flatlaf/0.45/"
+        "flatlaf-0.45.jar"
+    ),
+    path=Path("flatRepo") / "flatlaf.jar",
+    sha256="e06c9fe1ffff51cb172aeec124a7fe80867e984845e945272eb537459a42d716",
+)
+
+
+DEPENDENCIES = [
+    GHIDRA,
+    GHIDRA_DATA,
+    GHIDRA_DATA_EXTRA,
+    GHIDRA_EXTENSION_CPP_CLASS_ANALYZER,
+    GHIDRA_EXTENSION_RET_SYNC,
+    GHIDRA_EXTENSION_PWNDRA,
+    GHIDRA_EXTENSION_LAZY_GHIDRA,
+    GRADLE,
+    ANTLR,
+    ST4,
+    JAVACC,
+    JUNIT,
+    YAJSW,
+    FLATLAF,
+]
+
+
+def run(*args, env=None, capture=False):
+    args = [str(arg) for arg in args]
+    if env:
+        env = {str(k): str(v) for k, v in env.items() if v}
+    return subprocess.run(args, env=env, capture_output=capture, check=True)
+
+
+def gradle(*args, path=Path("."), env=None):
+    if (path / "dist").is_dir():
+        shutil.rmtree(path / "dist")
+
+    if platform.system() == "Windows":
+        g = [GRADLE.extract.path / "bin" / "gradle.bat"]
+    else:
+        g = ["sh", GRADLE.extract.path / "bin" / "gradle"]
+
+    run(*g, "--offline", "--no-daemon", "--project-dir", path, *args, env=env)
+
+
+def cmd_get_deps(_args):
+    for dep in DEPENDENCIES:
+        dep.download()
+
+
+def cmd_build(_args):
+    for dep in DEPENDENCIES:
+        dep.verify()
+        dep.populate()
+        dep.unarchive()
+
+    for src in Path("flatRepo").glob("catacombae_*.jar"):
+        dst = Path("flatRepo") / src.name[len("catacombae_") :]
+        if not dst.exists():
+            dst.symlink_to(src.name)
+
+    gradle("buildGhidra")
+
+    ghidra_archive = ZipFile.get(Path.cwd() / "build" / "dist")
+    with tempfile.TemporaryDirectory() as tmp:
+        with ZipFile(ghidra_archive) as z:
+            z.extractall(tmp)
+
+        env = {"GHIDRA_INSTALL_DIR": Path(tmp) / z.root, **os.environ}
+
+        ret_sync_path = GHIDRA_EXTENSION_RET_SYNC.extract.path
+        gradle(path=ret_sync_path, env=env)
+
+        analyzer_path = GHIDRA_EXTENSION_CPP_CLASS_ANALYZER.extract.path
+        (analyzer_path / "settings.gradle").touch()
+        gradle(path=analyzer_path, env=env)
+
+    with ZipFile(ghidra_archive, "a") as z:
+        z.write_dir(
+            GHIDRA_DATA_EXTRA.extract.path / "symbols",
+            z.root / "Ghidra" / "Features" / "Base" / "data" / "symbols",
+        )
+        z.write_dir(
+            GHIDRA_DATA.extract.path / "FunctionID",
+            z.root / "Ghidra" / "Features" / "FunctionID" / "data",
+        )
+        z.write_zip(
+            ZipFile.get(ret_sync_path / "dist"),
+            z.root / "Ghidra" / "Extensions",
+        )
+        z.write_zip(
+            ZipFile.get(analyzer_path / "dist"),
+            z.root / "Ghidra" / "Extensions",
+        )
+        z.write_file(
+            GHIDRA_EXTENSION_PWNDRA.extract.path / "LICENSE",
+            z.root / "Ghidra" / "Extensions" / "Pwndra" / "LICENSE",
+        )
+        z.write_data(
+            b"",
+            z.root / "Ghidra" / "Extensions" / "Pwndra" / "Module.manifest",
+        )
+        z.write_dir(
+            GHIDRA_EXTENSION_PWNDRA.extract.path / "scripts",
+            z.root / "Ghidra" / "Extensions" / "Pwndra" / "ghidra_scripts",
+        )
+        z.write_file(
+            GHIDRA_EXTENSION_LAZY_GHIDRA.extract.path / "LICENSE.md",
+            z.root / "Ghidra" / "Extensions" / "LazyGhidra" / "LICENSE.md",
+        )
+        z.write_data(
+            b"",
+            z.root
+            / "Ghidra"
+            / "Extensions"
+            / "LazyGhidra"
+            / "Module.manifest",
+        )
+        z.write_dir(
+            GHIDRA_EXTENSION_LAZY_GHIDRA.extract.path / "scripts",
+            z.root / "Ghidra" / "Extensions" / "LazyGhidra" / "ghidra_scripts",
+        )
+
+    ghidra_archive.rename(ghidra_archive.with_name("ghidra.zip"))
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    sp = ap.add_subparsers()
+    ap.set_defaults(fn=lambda *_: sys.exit(ap.format_usage()))
+
+    get_deps = sp.add_parser("get-deps")
+    get_deps.set_defaults(fn=cmd_get_deps)
+
+    build = sp.add_parser("build")
+    build.set_defaults(fn=cmd_build)
+
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
