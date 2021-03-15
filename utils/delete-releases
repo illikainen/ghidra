@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = "https://api.github.com"
+
+
+def getenv(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"missing {name}")
+    return value
+
+
+def build_opener() -> urllib.request.OpenerDirector:
+    opener = urllib.request.build_opener()
+    opener.addheaders = [
+        ("Authorization", "token " + getenv("GITHUB_TOKEN")),
+        ("User-Agent", "foobar"),
+    ]
+    return opener
+
+
+def main() -> None:
+    repo = getenv("GITHUB_REPOSITORY")
+    opener = build_opener()
+    try:
+        with opener.open(f"{API}/repos/{repo}/releases") as res:
+            for release in json.loads(res.read()):
+                req = urllib.request.Request(
+                    f"{API}/repos/{repo}/releases/{release['id']}",
+                    method="DELETE",
+                )
+                opener.open(req)
+                req = urllib.request.Request(
+                    f"{API}/repos/{repo}/git/refs/tags/{release['tag_name']}",
+                    method="DELETE",
+                )
+                opener.open(req)
+                time.sleep(30)
+    except urllib.error.HTTPError as e:
+        sys.exit(e)
+
+
+if __name__ == "__main__":
+    main()
